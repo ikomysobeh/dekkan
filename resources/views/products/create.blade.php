@@ -18,6 +18,10 @@
                 <button type="button" id="scan-barcode" class="btn btn-blue">
                     مسح الباركود
                 </button>
+                <button type="button" id="capture-barcode" class="btn btn-blue">
+                    📷 صورة الباركود
+                </button>
+                <input type="file" accept="image/*" capture="environment" id="barcode-photo" class="hidden">
             </div>
             @error('barcode')
             <p class="form-error">{{ $message }}</p>
@@ -25,8 +29,16 @@
         </div>
 
         <div id="scanner-container" class="hidden mb-4">
+            <video id="scan-video" class="w-full max-w-md mx-auto rounded" muted playsinline></video>
             <div id="reader" class="w-full max-w-md mx-auto"></div>
+            <div class="flex justify-center mt-2 gap-2">
+                <button type="button" id="torch-btn" class="btn btn-blue hidden">💡 الفلاش</button>
+                <button type="button" id="scan-cancel" class="btn btn-blue">إلغاء</button>
+            </div>
         </div>
+
+        {{-- Hidden container used to decode a barcode from a captured photo --}}
+        <div id="barcode-file-reader" class="hidden"></div>
 
         <div class="mb-4">
             <label for="name" class="block text-sm font-medium text-gray-700">اسم المنتج</label>
@@ -82,15 +94,103 @@
 @endsection
 
 @push('scripts')
-    <!-- Include html5-qrcode library -->
-    <script src="https://unpkg.com/html5-qrcode@2.3.8/html5-qrcode.min.js"></script>
+    <!-- html5-qrcode (fallback engine) + ZXing (still-photo decoder), served locally -->
+    <script src="{{ asset('js/html5-qrcode.min.js') }}"></script>
+    <script src="{{ asset('js/zxing.min.js') }}"></script>
+    <!-- Native BarcodeDetector live scanner with html5-qrcode fallback -->
+    <script src="{{ asset('js/barcode-scanner.js') }}"></script>
 
     <script>
         document.addEventListener('DOMContentLoaded', () => {
             const scanButton = document.getElementById('scan-barcode');
             const scannerContainer = document.getElementById('scanner-container');
             const barcodeInput = document.getElementById('barcode');
+            const torchBtn = document.getElementById('torch-btn');
             let html5QrcodeScanner;
+            let torchOn = false;
+
+            // Toggle the phone's flashlight (torch) on the running camera track
+            function setupTorch() {
+                const video = document.querySelector('#reader video');
+                if (!video || !video.srcObject) { torchBtn.classList.add('hidden'); return; }
+                const track = video.srcObject.getVideoTracks()[0];
+                const caps = track && track.getCapabilities ? track.getCapabilities() : {};
+                if (!caps.torch) { torchBtn.classList.add('hidden'); return; }
+                torchBtn.classList.remove('hidden');
+                torchBtn.onclick = () => {
+                    torchOn = !torchOn;
+                    track.applyConstraints({ advanced: [{ torch: torchOn }] })
+                        .catch(err => console.warn('Torch error:', err));
+                };
+            }
+
+            // ---- Decode a barcode from a captured photo (high-res still image) ----
+            const captureBtn = document.getElementById('capture-barcode');
+            const photoInput = document.getElementById('barcode-photo');
+
+            // Decode order: native BarcodeDetector -> ZXing (TRY_HARDER) -> html5-qrcode scanFile
+            async function decodeBarcodeFromImage(file) {
+                // 1) Native BarcodeDetector (fast + accurate, mainly on Android Chrome)
+                try {
+                    if ('BarcodeDetector' in window) {
+                        const formats = await BarcodeDetector.getSupportedFormats();
+                        const detector = new BarcodeDetector({ formats });
+                        const bitmap = await createImageBitmap(file);
+                        const codes = await detector.detect(bitmap);
+                        if (codes && codes.length) return codes[0].rawValue;
+                    }
+                } catch (err) {
+                    console.warn('BarcodeDetector failed:', err);
+                }
+                // 2) ZXing with TRY_HARDER — best for imperfect/blurry 1D barcodes
+                try {
+                    if (window.ZXing) {
+                        const hints = new Map();
+                        hints.set(ZXing.DecodeHintType.TRY_HARDER, true);
+                        const reader = new ZXing.BrowserMultiFormatReader(hints);
+                        const url = URL.createObjectURL(file);
+                        try {
+                            const result = await reader.decodeFromImageUrl(url);
+                            if (result) return result.getText();
+                        } finally {
+                            URL.revokeObjectURL(url);
+                            if (reader.reset) reader.reset();
+                        }
+                    }
+                } catch (err) {
+                    console.warn('ZXing failed:', err);
+                }
+                // 3) Fallback: html5-qrcode decodes the image file
+                try {
+                    const fileScanner = new Html5Qrcode("barcode-file-reader");
+                    const result = await fileScanner.scanFile(file, false);
+                    return result;
+                } catch (err) {
+                    console.warn('scanFile failed:', err);
+                    return null;
+                }
+            }
+
+            if (captureBtn && photoInput) {
+                captureBtn.addEventListener('click', () => photoInput.click());
+                photoInput.addEventListener('change', async (e) => {
+                    const file = e.target.files[0];
+                    if (!file) return;
+                    captureBtn.disabled = true;
+                    captureBtn.textContent = '... جاري القراءة';
+                    const code = await decodeBarcodeFromImage(file);
+                    captureBtn.disabled = false;
+                    captureBtn.textContent = '📷 صورة الباركود';
+                    photoInput.value = ''; // allow re-taking the same item
+                    if (code) {
+                        if (navigator.vibrate) navigator.vibrate(100);
+                        barcodeInput.value = code;
+                        fetchProductByBarcode(code);
+                    } else {
+                        alert('لم يتم العثور على باركود في الصورة. حاول التقاط صورة أوضح وأقرب للباركود.');
+                    }
+                });
+            }
 
             // Function to fetch product by barcode
             function fetchProductByBarcode(barcode) {
@@ -126,46 +226,47 @@
                     });
             }
 
-            // Barcode scan button event
-            scanButton.addEventListener('click', () => {
-                scannerContainer.classList.toggle('hidden');
-                if (!scannerContainer.classList.contains('hidden')) {
-                    // Initialize the scanner
-                    html5QrcodeScanner = new Html5Qrcode("reader");
-                    html5QrcodeScanner.start(
-                        { facingMode: "environment" }, // Use rear camera if available
-                        {
-                            fps: 10,
-                            qrbox: { width: 250, height: 100 }, // Adjust for barcode shape
-                            formatsToSupport: [
-                                Html5QrcodeSupportedFormats.CODE_128,
-                                Html5QrcodeSupportedFormats.EAN_13,
-                                Html5QrcodeSupportedFormats.EAN_8,
-                                Html5QrcodeSupportedFormats.UPC_A,
-                                Html5QrcodeSupportedFormats.UPC_E
-                            ]
-                        },
-                        (decodedText, decodedResult) => {
-                            // On successful scan
-                            barcodeInput.value = decodedText;
-                            html5QrcodeScanner.stop().then(() => {
-                                scannerContainer.classList.add('hidden');
-                                fetchProductByBarcode(decodedText);
-                            });
-                        },
-                        (errorMessage) => {
-                            console.warn('Scan error:', errorMessage);
+            // Barcode scan button event — native BarcodeDetector with html5-qrcode fallback
+            let scanHandle = null;
+            const scanVideo = document.getElementById('scan-video');
+            const scanCancelBtn = document.getElementById('scan-cancel');
+
+            function stopScanner() {
+                if (scanHandle) { scanHandle.stop(); scanHandle = null; }
+                torchBtn.classList.add('hidden');
+                scannerContainer.classList.add('hidden');
+            }
+
+            scanButton.addEventListener('click', async () => {
+                // Toggle off if already scanning
+                if (scanHandle) { stopScanner(); return; }
+
+                scannerContainer.classList.remove('hidden');
+                try {
+                    scanHandle = await startBarcodeScan({
+                        videoEl: scanVideo,
+                        readerElId: 'reader',
+                        onDetect: (text) => {
+                            barcodeInput.value = text;
+                            stopScanner();
+                            fetchProductByBarcode(text);
                         }
-                    ).catch((err) => {
-                        console.error('Failed to start scanner:', err);
-                        alert('فشل في تشغيل الماسح. تأكد من السماح باستخدام الكاميرا.');
                     });
-                } else if (html5QrcodeScanner) {
-                    html5QrcodeScanner.stop().catch((err) => {
-                        console.error('Failed to stop scanner:', err);
-                    });
+
+                    // Flashlight button, if the device supports it
+                    if (scanHandle.torchAvailable && scanHandle.torchAvailable()) {
+                        torchBtn.classList.remove('hidden');
+                        let torchState = false;
+                        torchBtn.onclick = () => { torchState = !torchState; scanHandle.setTorch(torchState); };
+                    }
+                } catch (err) {
+                    console.error('Failed to start scanner:', err);
+                    scannerContainer.classList.add('hidden');
+                    alert('فشل في تشغيل الماسح. تأكد من السماح باستخدام الكاميرا وأن الموقع يعمل عبر HTTPS.');
                 }
             });
+
+            if (scanCancelBtn) scanCancelBtn.addEventListener('click', stopScanner);
 
             // Barcode input change event
             barcodeInput.addEventListener('input', () => {

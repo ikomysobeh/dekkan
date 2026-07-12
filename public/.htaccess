@@ -3,6 +3,9 @@
         Options -MultiViews -Indexes
     </IfModule>
 
+    # Allow Apache to follow the public/storage symlink (fixes 403 on /storage/... images)
+    Options +FollowSymLinks
+
     RewriteEngine On
 
     # Handle Authorization Header
