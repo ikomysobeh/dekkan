@@ -21,6 +21,8 @@ Route::middleware('auth:sanctum')->group(function () {
 
     // ---- Products (specific paths BEFORE /{id}) ----
     Route::get('/products/search', [ProductApiController::class, 'search']);
+    Route::get('/products/categories', [ProductApiController::class, 'categories']);
+    Route::get('/products/select', [ProductApiController::class, 'forSelect']);
     Route::get('/products/alerts', [ProductApiController::class, 'alerts']);
     Route::get('/products/by-barcode/{barcode}', [ProductApiController::class, 'byBarcode']);
     Route::get('/products', [ProductApiController::class, 'index']);

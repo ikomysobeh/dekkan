@@ -44,6 +44,34 @@ class ProductApiController extends Controller
         return $this->item(ProductResource::collection($products));
     }
 
+    /** GET /api/products/categories — distinct, non-empty categories (for the dropdown). */
+    public function categories()
+    {
+        $categories = Product::whereNotNull('category')
+            ->where('category', '!=', '')
+            ->distinct()
+            ->orderBy('category')
+            ->pluck('category')
+            ->values();
+
+        return $this->item($categories);
+    }
+
+    /** GET /api/products/select?category= — all products (optionally by category) for the manual-add dropdown. */
+    public function forSelect(Request $request)
+    {
+        $query = Product::with('latestPurchase');
+
+        $category = trim((string) $request->get('category', ''));
+        if ($category !== '') {
+            $query->where('category', $category);
+        }
+
+        $products = $query->orderBy('name')->limit(500)->get();
+
+        return $this->item(ProductResource::collection($products));
+    }
+
     /** GET /api/products/by-barcode/{barcode}. */
     public function byBarcode(string $barcode)
     {
